@@ -78,9 +78,12 @@ func TestParseModelPath(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ParseModelPath(tc.arg)
+			got, err := ParseModelPath(tc.arg)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-			if got != tc.want {
+			if *got != tc.want {
 				t.Errorf("got: %q want: %q", got, tc.want)
 			}
 		})

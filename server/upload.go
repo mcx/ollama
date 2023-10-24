@@ -330,7 +330,7 @@ func (b *blobUploadWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func uploadBlob(ctx context.Context, mp ModelPath, layer *Layer, opts *RegistryOptions, fn func(api.ProgressResponse)) error {
+func uploadBlob(ctx context.Context, mp *ModelPath, layer *Layer, opts *RegistryOptions, fn func(api.ProgressResponse)) error {
 	requestURL := mp.BaseURL()
 	requestURL = requestURL.JoinPath("v2", mp.GetNamespaceRepository(), "blobs", layer.Digest)
 

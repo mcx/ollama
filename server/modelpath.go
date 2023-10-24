@@ -26,12 +26,13 @@ const (
 )
 
 var (
+	ErrInvalidModelPath   = errors.New("invalid model path")
 	ErrInvalidImageFormat = errors.New("invalid image format")
 	ErrInvalidProtocol    = errors.New("invalid protocol scheme")
 	ErrInsecureProtocol   = errors.New("insecure protocol http")
 )
 
-func ParseModelPath(name string) ModelPath {
+func ParseModelPath(name string) (*ModelPath, error) {
 	mp := ModelPath{
 		ProtocolScheme: DefaultProtocolScheme,
 		Registry:       DefaultRegistry,
@@ -64,7 +65,11 @@ func ParseModelPath(name string) ModelPath {
 		mp.Tag = tag
 	}
 
-	return mp
+	if mp.Repository == "" {
+		return nil, ErrInvalidModelPath
+	}
+
+	return &mp, nil
 }
 
 func (mp ModelPath) GetNamespaceRepository() string {

@@ -556,7 +556,11 @@ func ListModelsHandler(c *gin.Context) {
 			dir = strings.Trim(strings.TrimPrefix(dir, fp), string(os.PathSeparator))
 			tag := strings.Join([]string{dir, file}, ":")
 
-			mp := ParseModelPath(tag)
+			mp, err := ParseModelPath(tag)
+			if err != nil {
+				return err
+			}
+
 			manifest, digest, err := GetManifest(mp)
 			if err != nil {
 				log.Printf("skipping file: %s", fp)
