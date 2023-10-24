@@ -9,9 +9,19 @@ import (
 	"log"
 )
 
+const (
+	CommandModel     = "model"
+	CommandLicense   = "license"
+	CommandTemplate  = "template"
+	CommandSystem    = "system"
+	CommandPrompt    = "prompt"
+	CommandAdapter   = "adapter"
+	CommandParameter = "parameter"
+)
+
 type Command struct {
-	Name string
-	Args string
+	Name string `json:"name"`
+	Args string `json:"args"`
 }
 
 func (c *Command) Reset() {

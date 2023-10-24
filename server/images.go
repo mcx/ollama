@@ -236,138 +236,71 @@ func GetModel(name string) (*Model, error) {
 	return model, nil
 }
 
-func filenameWithPath(path, f string) (string, error) {
-	// if filePath starts with ~/, replace it with the user's home directory.
-	if strings.HasPrefix(f, fmt.Sprintf("~%s", string(os.PathSeparator))) {
-		parts := strings.Split(f, string(os.PathSeparator))
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("failed to open file: %v", err)
-		}
-
-		f = filepath.Join(home, filepath.Join(parts[1:]...))
-	}
-
-	// if filePath is not an absolute path, make it relative to the modelfile path
-	if !filepath.IsAbs(f) {
-		f = filepath.Join(filepath.Dir(path), f)
-	}
-
-	return f, nil
-}
-
-func CreateModel(ctx context.Context, name string, path string, fn func(resp api.ProgressResponse)) error {
-	mp, err := ParseModelPath(name)
-	if err != nil {
-		return err
-	}
-
-	var manifest *ManifestV2
-	var noprune string
-
-	// build deleteMap to prune unused layers
-	deleteMap := make(map[string]bool)
-
-	if noprune = os.Getenv("OLLAMA_NOPRUNE"); noprune == "" {
-		manifest, _, err = GetManifest(mp)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-
-		if manifest != nil {
-			for _, l := range manifest.Layers {
-				deleteMap[l.Digest] = true
-			}
-			deleteMap[manifest.Config.Digest] = true
-		}
-	}
-
-	mf, err := os.Open(path)
-	if err != nil {
-		fn(api.ProgressResponse{Status: fmt.Sprintf("couldn't open modelfile '%s'", path)})
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer mf.Close()
-
-	fn(api.ProgressResponse{Status: "parsing modelfile"})
-	commands, err := parser.Parse(mf)
-	if err != nil {
-		return err
-	}
-
+func CreateModel(ctx context.Context, name string, commands []parser.Command, fn func(resp api.ProgressResponse)) error {
 	config := ConfigV2{
 		Architecture: "amd64",
 		OS:           "linux",
 	}
 
 	var layers []*LayerReader
-	params := make(map[string][]string)
 	var sourceParams map[string]any
-	for _, c := range commands {
-		log.Printf("[%s] - %s\n", c.Name, c.Args)
-		switch c.Name {
-		case "model":
-			fn(api.ProgressResponse{Status: "looking for model"})
 
-			mp, err := ParseModelPath(c.Args)
-			if err != nil {
-				return err
-			}
+	params := make(map[string][]string)
+	for _, command := range commands {
+		mediatype := fmt.Sprintf("application/vnd.ollama.image.%s", command.Name)
 
-			mf, _, err := GetManifest(mp)
-			if err != nil {
-				modelFile, err := filenameWithPath(path, c.Args)
+		switch command.Name {
+		case parser.CommandModel:
+			modelpath, err := ParseModelPath(command.Args)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				fn(api.ProgressResponse{Status: "creating model layer"})
+				file, err := os.Open(command.Args)
 				if err != nil {
 					return err
 				}
-				if _, err := os.Stat(modelFile); err != nil {
-					// the model file does not exist, try pulling it
-					if errors.Is(err, os.ErrNotExist) {
-						fn(api.ProgressResponse{Status: "pulling model file"})
-						if err := PullModel(ctx, c.Args, &RegistryOptions{}, fn); err != nil {
-							return err
-						}
-						mf, _, err = GetManifest(mp)
-						if err != nil {
-							return fmt.Errorf("failed to open file after pull: %v", err)
-						}
-					} else {
-						return err
-					}
-				} else {
-					// create a model from this specified file
-					fn(api.ProgressResponse{Status: "creating model layer"})
-					file, err := os.Open(modelFile)
-					if err != nil {
-						return fmt.Errorf("failed to open file: %v", err)
-					}
-					defer file.Close()
+				defer file.Close()
 
-					ggml, err := llm.DecodeGGML(file)
-					if err != nil {
-						return err
-					}
-
-					config.ModelFormat = ggml.Name()
-					config.ModelFamily = ggml.ModelFamily()
-					config.ModelType = ggml.ModelType()
-					config.FileType = ggml.FileType()
-
-					// reset the file
-					file.Seek(0, io.SeekStart)
-
-					l, err := CreateLayer(file)
-					if err != nil {
-						return fmt.Errorf("failed to create layer: %v", err)
-					}
-					l.MediaType = "application/vnd.ollama.image.model"
-					layers = append(layers, l)
+				ggml, err := llm.DecodeGGML(file)
+				if err != nil {
+					return err
 				}
-			}
 
-			if mf != nil {
+				config.ModelFormat = ggml.Name()
+				config.ModelFamily = ggml.ModelFamily()
+				config.ModelType = ggml.ModelType()
+				config.FileType = ggml.FileType()
+
+				file.Seek(0, io.SeekStart)
+				layer, err := CreateLayer(file)
+				if err != nil {
+					return err
+				}
+
+				layer.MediaType = mediatype
+				layers = append(layers, layer)
+			case err != nil:
+				return err
+			default:
+				manifest, _, err := GetManifest(modelpath)
+				switch {
+				case errors.Is(err, os.ErrNotExist):
+					// pull it
+					fn(api.ProgressResponse{Status: "pulling model layer"})
+					if err := PullModel(ctx, command.Args, &RegistryOptions{}, fn); err != nil {
+						return err
+					}
+
+					manifest, _, err = GetManifest(modelpath)
+					if err != nil {
+						return err
+					}
+				case err != nil:
+					return err
+				}
+
 				fn(api.ProgressResponse{Status: "reading model metadata"})
-				sourceBlobPath, err := GetBlobsPath(mf.Config.Digest)
+				sourceBlobPath, err := GetBlobsPath(manifest.Config.Digest)
 				if err != nil {
 					return err
 				}
@@ -378,20 +311,19 @@ func CreateModel(ctx context.Context, name string, path string, fn func(resp api
 				}
 				defer sourceBlob.Close()
 
-				var source ConfigV2
-				if err := json.NewDecoder(sourceBlob).Decode(&source); err != nil {
+				var sourceConfig ConfigV2
+				if err := json.NewDecoder(sourceBlob).Decode(&sourceConfig); err != nil {
 					return err
 				}
 
-				// copy the model metadata
-				config.ModelFamily = source.ModelFamily
-				config.ModelType = source.ModelType
-				config.ModelFormat = source.ModelFormat
-				config.FileType = source.FileType
+				config.ModelFormat = sourceConfig.ModelFormat
+				config.ModelFamily = sourceConfig.ModelFamily
+				config.ModelType = sourceConfig.ModelType
+				config.FileType = sourceConfig.FileType
 
-				for _, l := range mf.Layers {
-					if l.MediaType == "application/vnd.ollama.image.params" {
-						sourceParamsBlobPath, err := GetBlobsPath(l.Digest)
+				for _, layer := range manifest.Layers {
+					if layer.MediaType == "application/vnd.ollama.image.params" {
+						sourceParamsBlobPath, err := GetBlobsPath(layer.Digest)
 						if err != nil {
 							return err
 						}
@@ -407,79 +339,69 @@ func CreateModel(ctx context.Context, name string, path string, fn func(resp api
 						}
 					}
 
-					newLayer, err := GetLayerWithBufferFromLayer(l)
+					newLayer, err := GetLayerWithBufferFromLayer(layer)
 					if err != nil {
 						return err
 					}
-					newLayer.From = mp.GetNamespaceRepository()
+
+					newLayer.From = modelpath.GetNamespaceRepository()
 					layers = append(layers, newLayer)
 				}
-			}
-		case "adapter":
-			fn(api.ProgressResponse{Status: fmt.Sprintf("creating model %s layer", c.Name)})
 
-			fp, err := filenameWithPath(path, c.Args)
+			}
+		case parser.CommandAdapter:
+			fn(api.ProgressResponse{Status: "creating adapter layer"})
+
+			file, err := os.Open(command.Args)
 			if err != nil {
 				return err
-			}
-
-			// create a model from this specified file
-			fn(api.ProgressResponse{Status: "creating model layer"})
-
-			file, err := os.Open(fp)
-			if err != nil {
-				return fmt.Errorf("failed to open file: %v", err)
 			}
 			defer file.Close()
 
-			l, err := CreateLayer(file)
-			if err != nil {
-				return fmt.Errorf("failed to create layer: %v", err)
-			}
-			l.MediaType = "application/vnd.ollama.image.adapter"
-			layers = append(layers, l)
-		case "license":
-			fn(api.ProgressResponse{Status: fmt.Sprintf("creating model %s layer", c.Name)})
-			mediaType := fmt.Sprintf("application/vnd.ollama.image.%s", c.Name)
-
-			layer, err := CreateLayer(strings.NewReader(c.Args))
+			layer, err := CreateLayer(file)
 			if err != nil {
 				return err
 			}
 
+			layer.MediaType = mediatype
+			layers = append(layers, layer)
+
+		case parser.CommandLicense:
+			fn(api.ProgressResponse{Status: "creating license layer"})
+
+			layer, err := CreateLayer(strings.NewReader(command.Args))
+			if err != nil {
+				return err
+			}
+			layer.MediaType = mediatype
+
 			if layer.Size > 0 {
-				layer.MediaType = mediaType
 				layers = append(layers, layer)
 			}
-		case "template", "system", "prompt":
-			fn(api.ProgressResponse{Status: fmt.Sprintf("creating model %s layer", c.Name)})
-			// remove the layer if one exists
-			mediaType := fmt.Sprintf("application/vnd.ollama.image.%s", c.Name)
-			layers = removeLayerFromLayers(layers, mediaType)
+		case parser.CommandTemplate, parser.CommandSystem:
+			fn(api.ProgressResponse{Status: fmt.Sprintf("creating %s layer", command.Name)})
 
-			layer, err := CreateLayer(strings.NewReader(c.Args))
+			layers = removeLayerFromLayers(layers, mediatype)
+			layer, err := CreateLayer(strings.NewReader(command.Args))
 			if err != nil {
 				return err
 			}
+			layer.MediaType = mediatype
 
 			if layer.Size > 0 {
-				layer.MediaType = mediaType
 				layers = append(layers, layer)
 			}
 		default:
-			// runtime parameters, build a list of args for each parameter to allow multiple values to be specified (ex: multiple stop sequences)
-			params[c.Name] = append(params[c.Name], c.Args)
+			params[command.Name] = append(params[command.Name], command.Args)
 		}
 	}
 
-	// Create a single layer for the parameters
 	if len(params) > 0 {
-		fn(api.ProgressResponse{Status: "creating parameter layer"})
+		fn(api.ProgressResponse{Status: "creating parameters layer"})
 
-		layers = removeLayerFromLayers(layers, "application/vnd.ollama.image.params")
 		formattedParams, err := formatParams(params)
 		if err != nil {
-			return fmt.Errorf("couldn't create params json: %v", err)
+			return err
 		}
 
 		for k, v := range sourceParams {
@@ -489,7 +411,7 @@ func CreateModel(ctx context.Context, name string, path string, fn func(resp api
 		}
 
 		if config.ModelType == "65B" {
-			if numGQA, ok := formattedParams["num_gqa"].(int); ok && numGQA == 8 {
+			if gqa, ok := formattedParams["num_gqa"].(int); ok && gqa == 8 {
 				config.ModelType = "70B"
 			}
 		}
@@ -499,12 +421,14 @@ func CreateModel(ctx context.Context, name string, path string, fn func(resp api
 			return err
 		}
 
-		l, err := CreateLayer(bytes.NewReader(bts))
+		layer, err := CreateLayer(bytes.NewReader(bts))
 		if err != nil {
-			return fmt.Errorf("failed to create layer: %v", err)
+			return err
 		}
-		l.MediaType = "application/vnd.ollama.image.params"
-		layers = append(layers, l)
+
+		layer.MediaType = "application/vnd.ollama.image.params"
+
+		layers = append(removeLayerFromLayers(layers, "application/vnd.ollama.image.params"), layer)
 	}
 
 	digests, err := getLayerDigests(layers)
@@ -512,47 +436,35 @@ func CreateModel(ctx context.Context, name string, path string, fn func(resp api
 		return err
 	}
 
-	var manifestLayers []*Layer
-	for _, l := range layers {
-		manifestLayers = append(manifestLayers, &l.Layer)
-		delete(deleteMap, l.Layer.Digest)
-	}
-
-	// Create a layer for the config object
 	fn(api.ProgressResponse{Status: "creating config layer"})
-	cfg, err := createConfigLayer(config, digests)
+	configLayer, err := createConfigLayer(config, digests)
 	if err != nil {
 		return err
 	}
-	layers = append(layers, cfg)
-	delete(deleteMap, cfg.Layer.Digest)
+
+	layers = append(layers, configLayer)
 
 	if err := SaveLayers(layers, fn, false); err != nil {
 		return err
 	}
 
-	// Create the manifest
-	fn(api.ProgressResponse{Status: "writing manifest"})
-	err = CreateManifest(name, cfg, manifestLayers)
-	if err != nil {
-		return err
+	var contentLayers []*Layer
+	for _, layer := range layers {
+		contentLayers = append(contentLayers, &layer.Layer)
 	}
 
-	if noprune == "" {
-		fn(api.ProgressResponse{Status: "removing any unused layers"})
-		err = deleteUnusedLayers(nil, deleteMap, false)
-		if err != nil {
-			return err
-		}
+	fn(api.ProgressResponse{Status: "writing manifest"})
+	if err := CreateManifest(name, configLayer, contentLayers); err != nil {
+		return err
 	}
 
 	fn(api.ProgressResponse{Status: "success"})
 	return nil
 }
 
-func removeLayerFromLayers(layers []*LayerReader, mediaType string) []*LayerReader {
+func removeLayerFromLayers(layers []*LayerReader, mediatype string) []*LayerReader {
 	return slices.DeleteFunc(layers, func(layer *LayerReader) bool {
-		return layer.MediaType == mediaType
+		return layer.MediaType == mediatype
 	})
 }
 

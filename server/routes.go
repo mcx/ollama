@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/jmorganca/ollama/api"
 	"github.com/jmorganca/ollama/llm"
+	"github.com/jmorganca/ollama/parser"
 	"github.com/jmorganca/ollama/version"
 )
 
@@ -393,8 +395,53 @@ func CreateModelHandler(c *gin.Context) {
 		return
 	}
 
-	if req.Name == "" || req.Path == "" {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "name and path are required"})
+	if req.Name == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	if req.Path == "" && req.Commands == nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "path or commands is required"})
+		return
+	}
+
+	if req.Path != "" && req.Commands == nil {
+		data, err := os.Open(req.Path)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		req.Commands, err = parser.Parse(data)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	var errs []error
+	for _, command := range req.Commands {
+		switch command.Name {
+		case "model":
+			_, err := ParseModelPath(command.Args)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				if _, err = os.Stat(command.Args); err != nil {
+					errs = append(errs, err)
+				}
+			case err != nil:
+				errs = append(errs, err)
+			}
+
+		case "adapter":
+			if _, err = os.Stat(command.Args); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		c.AbortWithStatusJSON(http.StatusTeapot, gin.H{"error": errs})
 		return
 	}
 
@@ -408,7 +455,7 @@ func CreateModelHandler(c *gin.Context) {
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()
 
-		if err := CreateModel(ctx, req.Name, req.Path, fn); err != nil {
+		if err := CreateModel(ctx, req.Name, req.Commands, fn); err != nil {
 			ch <- gin.H{"error": err.Error()}
 		}
 	}()
@@ -673,12 +720,66 @@ func Serve(ln net.Listener, allowOrigins []string) error {
 	r.DELETE("/api/delete", DeleteModelHandler)
 	r.POST("/api/show", ShowModelHandler)
 
+	r.POST("/api/layers/:digest", func(c *gin.Context) {
+		hash := sha256.New()
+		temp, err := os.CreateTemp("", c.Param("digest"))
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		defer temp.Close()
+		defer os.Remove(temp.Name())
+
+		if _, err := io.Copy(temp, io.TeeReader(c.Request.Body, hash)); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if fmt.Sprintf("sha256:%x", hash.Sum(nil)) != c.Param("digest") {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "digest mismatch"})
+			return
+		}
+
+		if err := temp.Close(); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		targetPath, err := GetBlobsPath(c.Param("digest"))
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if err := os.Rename(temp.Name(), targetPath); err != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, api.CreateLayerResponse{Path: targetPath})
+	})
+
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		r.Handle(method, "/", func(c *gin.Context) {
 			c.String(http.StatusOK, "Ollama is running")
 		})
 
 		r.Handle(method, "/api/tags", ListModelsHandler)
+
+		r.Handle(method, "/api/layers/:digest", func(c *gin.Context) {
+			path, err := GetBlobsPath(c.Param("digest"))
+			if err != nil {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+
+			if _, err := os.Stat(path); err != nil {
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": err.Error()})
+				return
+			}
+
+			c.JSON(http.StatusOK, api.CreateLayerResponse{Path: path})
+		})
 	}
 
 	log.Printf("Listening on %s (version %s)", ln.Addr(), version.Version)

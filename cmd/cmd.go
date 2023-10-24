@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/jmorganca/ollama/api"
 	"github.com/jmorganca/ollama/format"
+	"github.com/jmorganca/ollama/parser"
 	"github.com/jmorganca/ollama/progressbar"
 	"github.com/jmorganca/ollama/readline"
 	"github.com/jmorganca/ollama/server"
@@ -36,8 +38,12 @@ import (
 )
 
 func CreateHandler(cmd *cobra.Command, args []string) error {
-	filename, _ := cmd.Flags().GetString("file")
-	filename, err := filepath.Abs(filename)
+	filename, err := cmd.Flags().GetString("file")
+	if err != nil {
+		return err
+	}
+
+	filename, err = filepath.Abs(filename)
 	if err != nil {
 		return err
 	}
@@ -47,17 +53,56 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var spinner *Spinner
+	modelfile, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer modelfile.Close()
+
+	commands, err := parser.Parse(modelfile)
+	if err != nil {
+		return err
+	}
+
+	spinner := NewSpinner("transferring context")
+	go spinner.Spin(100 * time.Millisecond)
+
+	for i := range commands {
+		switch commands[i].Name {
+		case parser.CommandModel, parser.CommandAdapter:
+			binfile, err := os.Open(commands[i].Args)
+			switch {
+			case errors.Is(err, os.ErrNotExist) && commands[i].Name == parser.CommandModel:
+				// model might be an model name and not a file path
+				continue
+			case err != nil:
+				return err
+			}
+			defer binfile.Close()
+
+			hash := sha256.New()
+			if _, err := io.Copy(hash, binfile); err != nil {
+				return err
+			}
+			binfile.Seek(0, io.SeekStart)
+
+			digest := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+			path, err := client.CreateLayerRequest(context.Background(), digest, binfile)
+			if err != nil {
+				return err
+			}
+
+			commands[i].Args = path
+		}
+	}
 
 	var currentDigest string
 	var bar *progressbar.ProgressBar
 
-	request := api.CreateRequest{Name: args[0], Path: filename}
+	request := api.CreateRequest{Name: args[0], Path: filename, Commands: commands}
 	fn := func(resp api.ProgressResponse) error {
 		if resp.Digest != currentDigest && resp.Digest != "" {
-			if spinner != nil {
-				spinner.Stop()
-			}
+			spinner.Stop()
 			currentDigest = resp.Digest
 			// pulling
 			bar = progressbar.DefaultBytes(
@@ -69,9 +114,7 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 			bar.Set64(resp.Completed)
 		} else {
 			currentDigest = ""
-			if spinner != nil {
-				spinner.Stop()
-			}
+			spinner.Stop()
 			spinner = NewSpinner(resp.Status)
 			go spinner.Spin(100 * time.Millisecond)
 		}
@@ -83,11 +126,9 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if spinner != nil {
-		spinner.Stop()
-		if spinner.description != "success" {
-			return errors.New("unexpected end to create model")
-		}
+	spinner.Stop()
+	if spinner.description != "success" {
+		return errors.New("unexpected end to create model")
 	}
 
 	return nil
