@@ -242,6 +242,8 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 		OS:           "linux",
 	}
 
+	deleteMap := make(map[string]struct{})
+
 	var layers []*LayerReader
 	var sourceParams map[string]any
 
@@ -322,6 +324,8 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 				config.FileType = sourceConfig.FileType
 
 				for _, layer := range manifest.Layers {
+					deleteMap[layer.Digest] = struct{}{}
+
 					if layer.MediaType == "application/vnd.ollama.image.params" {
 						sourceParamsBlobPath, err := GetBlobsPath(layer.Digest)
 						if err != nil {
@@ -348,7 +352,9 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 					layers = append(layers, newLayer)
 				}
 
+				deleteMap[manifest.Config.Digest] = struct{}{}
 			}
+
 		case parser.CommandAdapter:
 			fn(api.ProgressResponse{Status: "creating adapter layer"})
 
@@ -443,6 +449,7 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 	}
 
 	layers = append(layers, configLayer)
+	delete(deleteMap, configLayer.Digest)
 
 	if err := SaveLayers(layers, fn, false); err != nil {
 		return err
@@ -451,11 +458,18 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 	var contentLayers []*Layer
 	for _, layer := range layers {
 		contentLayers = append(contentLayers, &layer.Layer)
+		delete(deleteMap, layer.Digest)
 	}
 
 	fn(api.ProgressResponse{Status: "writing manifest"})
 	if err := CreateManifest(name, configLayer, contentLayers); err != nil {
 		return err
+	}
+
+	if noprune := os.Getenv("OLLAMA_NOPRUNE"); noprune == "" {
+		if err := deleteUnusedLayers(nil, deleteMap, false); err != nil {
+			return err
+		}
 	}
 
 	fn(api.ProgressResponse{Status: "success"})
@@ -677,7 +691,7 @@ func CopyModel(src, dest string) error {
 	return nil
 }
 
-func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]bool, dryRun bool) error {
+func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]struct{}, dryRun bool) error {
 	fp, err := GetManifestPath()
 	if err != nil {
 		return err
@@ -720,21 +734,19 @@ func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]bool, dry
 	}
 
 	// only delete the files which are still in the deleteMap
-	for k, v := range deleteMap {
-		if v {
-			fp, err := GetBlobsPath(k)
-			if err != nil {
-				log.Printf("couldn't get file path for '%s': %v", k, err)
+	for k := range deleteMap {
+		fp, err := GetBlobsPath(k)
+		if err != nil {
+			log.Printf("couldn't get file path for '%s': %v", k, err)
+			continue
+		}
+		if !dryRun {
+			if err := os.Remove(fp); err != nil {
+				log.Printf("couldn't remove file '%s': %v", fp, err)
 				continue
 			}
-			if !dryRun {
-				if err := os.Remove(fp); err != nil {
-					log.Printf("couldn't remove file '%s': %v", fp, err)
-					continue
-				}
-			} else {
-				log.Printf("wanted to remove: %s", fp)
-			}
+		} else {
+			log.Printf("wanted to remove: %s", fp)
 		}
 	}
 
@@ -742,7 +754,7 @@ func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]bool, dry
 }
 
 func PruneLayers() error {
-	deleteMap := make(map[string]bool)
+	deleteMap := make(map[string]struct{})
 	p, err := GetBlobsPath("")
 	if err != nil {
 		return err
@@ -759,7 +771,7 @@ func PruneLayers() error {
 		if runtime.GOOS == "windows" {
 			name = strings.ReplaceAll(name, "-", ":")
 		}
-		deleteMap[name] = true
+		deleteMap[name] = struct{}{}
 	}
 
 	log.Printf("total blobs: %d", len(deleteMap))
@@ -818,14 +830,13 @@ func DeleteModel(name string) error {
 		return err
 	}
 
-	deleteMap := make(map[string]bool)
+	deleteMap := make(map[string]struct{})
 	for _, layer := range manifest.Layers {
-		deleteMap[layer.Digest] = true
+		deleteMap[layer.Digest] = struct{}{}
 	}
-	deleteMap[manifest.Config.Digest] = true
+	deleteMap[manifest.Config.Digest] = struct{}{}
 
-	err = deleteUnusedLayers(mp, deleteMap, false)
-	if err != nil {
+	if err := deleteUnusedLayers(mp, deleteMap, false); err != nil {
 		return err
 	}
 
@@ -964,7 +975,7 @@ func PullModel(ctx context.Context, name string, regOpts *RegistryOptions, fn fu
 	var noprune string
 
 	// build deleteMap to prune unused layers
-	deleteMap := make(map[string]bool)
+	deleteMap := make(map[string]struct{})
 
 	if noprune = os.Getenv("OLLAMA_NOPRUNE"); noprune == "" {
 		manifest, _, err = GetManifest(mp)
@@ -974,9 +985,9 @@ func PullModel(ctx context.Context, name string, regOpts *RegistryOptions, fn fu
 
 		if manifest != nil {
 			for _, l := range manifest.Layers {
-				deleteMap[l.Digest] = true
+				deleteMap[l.Digest] = struct{}{}
 			}
-			deleteMap[manifest.Config.Digest] = true
+			deleteMap[manifest.Config.Digest] = struct{}{}
 		}
 	}
 
@@ -1051,8 +1062,7 @@ func PullModel(ctx context.Context, name string, regOpts *RegistryOptions, fn fu
 
 	if noprune == "" {
 		fn(api.ProgressResponse{Status: "removing any unused layers"})
-		err = deleteUnusedLayers(nil, deleteMap, false)
-		if err != nil {
+		if err := deleteUnusedLayers(nil, deleteMap, false); err != nil {
 			return err
 		}
 	}
