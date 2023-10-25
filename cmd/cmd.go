@@ -73,7 +73,7 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 			binfile, err := os.Open(commands[i].Args)
 			switch {
 			case errors.Is(err, os.ErrNotExist) && commands[i].Name == parser.CommandModel:
-				// model might be an model name and not a file path
+				// model might be a model name and not a file path
 				continue
 			case err != nil:
 				return err
