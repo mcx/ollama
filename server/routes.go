@@ -207,6 +207,7 @@ func GenerateHandler(c *gin.Context) {
 		}
 
 		fn := func(r api.GenerateResponse) {
+			fmt.Printf("generate response: %v", r)
 			log.Printf("generate response: %v", r)
 			loaded.expireAt = time.Now().Add(sessionDuration)
 			loaded.expireTimer.Reset(sessionDuration)

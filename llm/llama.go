@@ -13,6 +13,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"os/exec"
 	"path"
@@ -480,11 +481,51 @@ type prediction struct {
 
 const maxBufferSize = 512 * format.KiloByte
 
+type nopCloser struct {
+	io.Reader
+}
+
+func (nopCloser) Close() error { return nil }
+
+func RequestToCurlCommand(req *http.Request) (string, error) {
+	command := "curl -v"
+
+	// Add method
+	command += fmt.Sprintf(" -X %s", req.Method)
+
+	// Add headers
+	for name, headers := range req.Header {
+		for _, h := range headers {
+			command += fmt.Sprintf(" -H '%s: %s'", name, h)
+		}
+	}
+
+	// Add body
+	if req.Body != nil {
+		bodyBytes, err := httputil.DumpRequest(req, true)
+		if err != nil {
+			return "", err
+		}
+		req.Body = nopCloser{bytes.NewBuffer(bodyBytes)}
+
+		bodyStart := bytes.Index(bodyBytes, []byte("\r\n\r\n")) + 4
+		command += fmt.Sprintf(" -d '%s'", bodyBytes[bodyStart:])
+	}
+
+	// Add URL
+	command += fmt.Sprintf(" '%s'", req.URL)
+
+	return command, nil
+}
+
 func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string, fn func(api.GenerateResponse)) error {
+	fmt.Println("prevContext: ", prevContext)
 	prevConvo, err := llm.Decode(ctx, prevContext)
 	if err != nil {
 		return err
 	}
+
+	fmt.Println("decode prevConvo: ", prevConvo)
 
 	// Remove leading spaces from prevConvo if present
 	prevConvo = strings.TrimPrefix(prevConvo, " ")
@@ -531,6 +572,13 @@ func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string,
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	curlCommand, err := RequestToCurlCommand(req)
+	if err != nil {
+		fmt.Printf("Error: %s\n", err)
+	} else {
+		fmt.Println(curlCommand)
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST predict: %v", err)
@@ -546,6 +594,8 @@ func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string,
 		return fmt.Errorf("%s", bodyBytes)
 	}
 
+	fmt.Printf("resp: %v", resp)
+
 	scanner := bufio.NewScanner(resp.Body)
 	// increase the buffer size to avoid running out of space
 	buf := make([]byte, 0, maxBufferSize)
@@ -554,10 +604,12 @@ func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string,
 		select {
 		case <-ctx.Done():
 			// This handles the request cancellation
+			fmt.Println("context error")
 			return ctx.Err()
 		default:
 			line := scanner.Bytes()
 			if len(line) == 0 {
+				fmt.Println("empty line")
 				continue
 			}
 
@@ -566,6 +618,8 @@ func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string,
 				if err := json.Unmarshal(evt, &p); err != nil {
 					return fmt.Errorf("error unmarshaling llm prediction response: %v", err)
 				}
+
+				fmt.Printf("prediction: %v", p)
 
 				if p.Content != "" {
 					fn(api.GenerateResponse{Response: p.Content})
@@ -594,6 +648,7 @@ func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string,
 	}
 
 	if err := scanner.Err(); err != nil {
+		fmt.Printf("error reading llm response: %v", err)
 		if strings.Contains(err.Error(), "unexpected EOF") {
 			// this means the llama runner subprocess crashed
 			llm.Close()
@@ -604,6 +659,8 @@ func (llm *llama) Predict(ctx context.Context, prevContext []int, prompt string,
 		}
 		return fmt.Errorf("error reading llm response: %v", err)
 	}
+
+	fmt.Println("done")
 
 	return nil
 }
