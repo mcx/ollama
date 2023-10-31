@@ -191,6 +191,7 @@ func GenerateHandler(c *gin.Context) {
 
 	prompt, err := model.Prompt(req)
 	if err != nil {
+		log.Printf("prompt: %s", prompt)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -201,10 +202,12 @@ func GenerateHandler(c *gin.Context) {
 		// an empty request loads the model
 		if req.Prompt == "" && req.Template == "" && req.System == "" {
 			ch <- api.GenerateResponse{CreatedAt: time.Now().UTC(), Model: req.Model, Done: true}
+			log.Printf("loaded model: %s", req.Model)
 			return
 		}
 
 		fn := func(r api.GenerateResponse) {
+			log.Printf("generate response: %v", r)
 			loaded.expireAt = time.Now().Add(sessionDuration)
 			loaded.expireTimer.Reset(sessionDuration)
 
@@ -219,6 +222,7 @@ func GenerateHandler(c *gin.Context) {
 		}
 
 		if err := loaded.runner.Predict(c.Request.Context(), req.Context, prompt, fn); err != nil {
+			log.Printf("runner predict failed: %v", err)
 			ch <- gin.H{"error": err.Error()}
 		}
 	}()
