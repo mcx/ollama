@@ -252,7 +252,7 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 		mediatype := fmt.Sprintf("application/vnd.ollama.image.%s", command.Name)
 
 		switch command.Name {
-		case parser.CommandModel:
+		case parser.CommandFrom:
 			modelpath, err := ParseModelPath(command.Args)
 			switch {
 			case errors.Is(err, os.ErrNotExist):
@@ -279,7 +279,7 @@ func CreateModel(ctx context.Context, name string, commands []parser.Command, fn
 					return err
 				}
 
-				layer.MediaType = mediatype
+				layer.MediaType = "application/vnd.ollama.image.model"
 				layers = append(layers, layer)
 			case err != nil:
 				return err

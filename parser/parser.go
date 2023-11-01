@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 )
 
 const (
-	CommandModel     = "model"
+	CommandFrom      = "from"
 	CommandLicense   = "license"
 	CommandTemplate  = "template"
 	CommandSystem    = "system"
@@ -44,16 +45,16 @@ func Parse(reader io.Reader) ([]Command, error) {
 			continue
 		}
 
-		switch string(bytes.ToUpper(fields[0])) {
-		case "FROM":
-			command.Name = "model"
+		switch name := bytes.ToLower(fields[0]); string(name) {
+		case CommandFrom:
+			command.Name = string(name)
 			command.Args = string(fields[1])
 			// copy command for validation
 			modelCommand = command
-		case "LICENSE", "TEMPLATE", "SYSTEM", "PROMPT", "ADAPTER":
-			command.Name = string(bytes.ToLower(fields[0]))
+		case CommandLicense, CommandTemplate, CommandSystem, CommandPrompt, CommandAdapter:
+			command.Name = string(name)
 			command.Args = string(fields[1])
-		case "PARAMETER":
+		case CommandParameter:
 			fields = bytes.SplitN(fields[1], []byte(" "), 2)
 			if len(fields) < 2 {
 				return nil, fmt.Errorf("missing value for %s", fields)
@@ -80,6 +81,24 @@ func Parse(reader io.Reader) ([]Command, error) {
 	}
 
 	return commands, scanner.Err()
+}
+
+func Format(w io.Writer, commands []Command) error {
+	for _, command := range commands {
+		multiline := ""
+		if strings.Contains(command.Args, "\n") {
+			multiline = `"""`
+		}
+
+		switch command.Name {
+		case CommandFrom, CommandAdapter, CommandLicense, CommandTemplate, CommandSystem:
+			fmt.Fprintf(w, "%s %s%s%s\n", strings.ToUpper(command.Name), multiline, command.Args, multiline)
+		default:
+			fmt.Fprintf(w, "PARAMETER %s %s%s%s\n", command.Name, multiline, command.Args, multiline)
+		}
+	}
+
+	return nil
 }
 
 func scanModelfile(data []byte, atEOF bool) (advance int, token []byte, err error) {

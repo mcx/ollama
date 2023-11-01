@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"time"
-
-	"github.com/jmorganca/ollama/parser"
 )
 
 type StatusError struct {
@@ -57,8 +55,7 @@ type EmbeddingResponse struct {
 type CreateRequest struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
-
-	Commands []parser.Command `json:"commands"`
+	Data string `json:"data"`
 
 	Stream *bool `json:"stream,omitempty"`
 }

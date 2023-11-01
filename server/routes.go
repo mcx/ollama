@@ -400,27 +400,29 @@ func CreateModelHandler(c *gin.Context) {
 		return
 	}
 
-	if req.Path == "" && req.Commands == nil {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "path or commands is required"})
+	if req.Path == "" && req.Data == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "path or data is required"})
 		return
 	}
 
-	if req.Path != "" && req.Commands == nil {
-		data, err := os.Open(req.Path)
+	if req.Path != "" && req.Data == "" {
+		bts, err := os.ReadFile(req.Path)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		req.Commands, err = parser.Parse(data)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
+		req.Data = string(bts)
+	}
+
+	commands, err := parser.Parse(strings.NewReader(req.Data))
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	var errs []error
-	for _, command := range req.Commands {
+	for _, command := range commands {
 		switch command.Name {
 		case "model":
 			_, err := ParseModelPath(command.Args)
@@ -455,7 +457,7 @@ func CreateModelHandler(c *gin.Context) {
 		ctx, cancel := context.WithCancel(c.Request.Context())
 		defer cancel()
 
-		if err := CreateModel(ctx, req.Name, req.Commands, fn); err != nil {
+		if err := CreateModel(ctx, req.Name, commands, fn); err != nil {
 			ch <- gin.H{"error": err.Error()}
 		}
 	}()

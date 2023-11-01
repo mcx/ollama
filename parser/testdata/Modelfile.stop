@@ -1,0 +1,3 @@
+FROM llama2
+PARAMETER stop ### User:
+PARAMETER stop ### Assistant:

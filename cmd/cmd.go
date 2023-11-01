@@ -69,10 +69,10 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 
 	for i := range commands {
 		switch commands[i].Name {
-		case parser.CommandModel, parser.CommandAdapter:
+		case parser.CommandFrom, parser.CommandAdapter:
 			binfile, err := os.Open(commands[i].Args)
 			switch {
-			case errors.Is(err, os.ErrNotExist) && commands[i].Name == parser.CommandModel:
+			case errors.Is(err, os.ErrNotExist) && commands[i].Name == parser.CommandFrom:
 				// model might be a model name and not a file path
 				continue
 			case err != nil:
@@ -96,10 +96,15 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	var sb strings.Builder
+	if err := parser.Format(&sb, commands); err != nil {
+		return err
+	}
+
 	var currentDigest string
 	var bar *progressbar.ProgressBar
 
-	request := api.CreateRequest{Name: args[0], Path: filename, Commands: commands}
+	request := api.CreateRequest{Name: args[0], Path: filename, Data: sb.String()}
 	fn := func(resp api.ProgressResponse) error {
 		if resp.Digest != currentDigest && resp.Digest != "" {
 			spinner.Stop()
