@@ -48,10 +48,16 @@ type Model struct {
 	Options       map[string]interface{}
 }
 
-func (m *Model) Prompt(request api.GenerateRequest) (string, error) {
+type PromptVars struct {
+	First  bool
+	System string
+	Prompt string
+}
+
+func (m *Model) Prompt(vars PromptVars, reqTemplate string) (string, error) {
 	t := m.Template
-	if request.Template != "" {
-		t = request.Template
+	if reqTemplate != "" {
+		t = reqTemplate
 	}
 
 	tmpl, err := template.New("").Parse(t)
@@ -59,22 +65,9 @@ func (m *Model) Prompt(request api.GenerateRequest) (string, error) {
 		return "", err
 	}
 
-	var vars struct {
-		First  bool
-		System string
-		Prompt string
-	}
-
-	vars.First = len(request.Context) == 0
-
-	vars.Prompt = request.Prompt
-
-	if len(request.Context) == 0 {
+	if vars.System == "" {
+		// use the default system prompt for this model if one is not specified
 		vars.System = m.System
-	}
-
-	if request.System != "" {
-		vars.System = request.System
 	}
 
 	var sb strings.Builder
