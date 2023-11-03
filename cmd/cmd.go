@@ -451,7 +451,10 @@ func generate(cmd *cobra.Command, model, prompt string, history []api.PromptHist
 	if err := client.Generate(cancelCtx, &request, fn); err != nil {
 		if strings.Contains(err.Error(), "context canceled") && abort {
 			spinner.Finish()
-			return nil, nil // TODO: should the prompt history have the partial response?
+			return &api.PromptHistory{
+				Prompt:   prompt,
+				Response: fullResponse.String(),
+			}, nil
 		}
 		return nil, err
 	}
@@ -462,7 +465,10 @@ func generate(cmd *cobra.Command, model, prompt string, history []api.PromptHist
 
 	if !latest.Done {
 		if abort {
-			return nil, nil // TODO: should the prompt history have the partial response?
+			return &api.PromptHistory{
+				Prompt:   prompt,
+				Response: fullResponse.String(),
+			}, nil
 		}
 		return nil, errors.New("unexpected end of response")
 	}
